@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Escáner de códigos</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root { --bg:#f5f6f8; --card:#ffffff; --text:#1d2330; --muted:#6b7280; --accent:#2563eb; --ok:#16a34a; --err:#dc2626; --border:#d1d5db; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#0f1420; --card:#171e2e; --text:#e6e9f0; --muted:#9aa3b5; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; --border:#2c3650; }
+  }
+  :root[data-theme="dark"] { --bg:#0f1420; --card:#171e2e; --text:#e6e9f0; --muted:#9aa3b5; --accent:#60a5fa; --ok:#4ade80; --err:#f87171; --border:#2c3650; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:12px; }
+  #reader { width:100%; min-height: 220px; border-radius:8px; overflow:hidden; background:#000; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select, textarea { width:100%; font-size:16px; padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+  textarea { min-height: 60px; resize: vertical; }
+  button { width:100%; font-size:16px; padding:12px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; margin-top:8px; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { margin-top:10px; font-size:15px; min-height:20px; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .muted { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Escáner de códigos</h1>
+
+  <div class="card">
+    <div id="reader"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnCam" type="button" class="secondary">Iniciar cámara</button>
+    </div>
+    <p class="muted">Lee EAN-13 y Code 128. Si la cámara no funciona, escribe el código abajo.</p>
+  </div>
+
+  <form id="form" class="card" autocomplete="off">
+    <label for="codigo">Código</label>
+    <input id="codigo" name="codigo" inputmode="text" required placeholder="Escanea o escribe">
+    <div class="muted" id="formato">Formato: —</div>
+    <input type="hidden" id="formatoVal" name="formato" value="">
+
+    <div class="row">
+      <div>
+        <label for="tipo">Tipo</label>
+        <select id="tipo" name="tipo" required>
+          <option value="Bodega">Bodega</option>
+          <option value="Medidor">Medidor</option>
+        </select>
+      </div>
+      <div>
+        <label for="cantidad">Cantidad o lectura</label>
+        <input id="cantidad" name="cantidad" inputmode="decimal" required>
+      </div>
+    </div>
+
+    <label for="usuario">Usuario</label>
+    <input id="usuario" name="usuario" required>
+
+    <label for="notas">Notas</label>
+    <textarea id="notas" name="notas"></textarea>
+
+    <button id="btnSave" type="submit">Guardar</button>
+    <div id="status" role="status"></div>
+  </form>
+</main>
+
+<script>
+  // ===== Configuración =====
+  const ENDPOINT = "https://script.google.com/macros/s/AKfycbzwf7tP6KQlnfIKnLwN153GqSLOuUSPcQ4-Nx--W1tagwEUxid-wl-84ngxO1nFT4pixQ/exec";
+  const TOKEN = "Qm7vR2xT9kLp4wZs8nHd3yFa6eUj1cBo";
+  const HOJA = "Escaneos";
+
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  const formatoEl = $("formato");
+
+  // Recordar el usuario entre sesiones (solo en este dispositivo)
+  try { $("usuario").value = localStorage.getItem("ec_usuario") || ""; } catch (e) {}
+
+  function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+
+  function setCodigo(texto, formato) {
+    $("codigo").value = texto;
+    $("formatoVal").value = formato;
+    formatoEl.textContent = "Formato: " + formato;
+    if (navigator.vibrate) navigator.vibrate(80);
+  }
+
+  // ===== Cámara =====
+  let scanner = null;
+  let camOn = false;
+
+  async function toggleCamera() {
+    const btn = $("btnCam");
+    if (camOn) {
+      try { await scanner.stop(); await scanner.clear(); } catch (e) {}
+      camOn = false;
+      btn.textContent = "Iniciar cámara";
+      return;
+    }
+    try {
+      if (!scanner) {
+        scanner = new Html5Qrcode("reader", {
+          formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.CODE_128],
+          verbose: false
+        });
+      }
+      await scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 300, height: 150 } },
+        (texto, resultado) => {
+          const formato = resultado && resultado.result && resultado.result.format
+            ? resultado.result.format.formatName : "";
+          setCodigo(texto, formato === "EAN_13" ? "EAN-13" : formato === "CODE_128" ? "Code 128" : formato);
+        },
+        () => {}
+      );
+      camOn = true;
+      btn.textContent = "Detener cámara";
+    } catch (e) {
+      setStatus("No se pudo abrir la cámara. Revisa el permiso del navegador o escribe el código.", "err");
+    }
+  }
+  $("btnCam").addEventListener("click", toggleCamera);
+
+  // Si escriben el código a mano, el formato queda como "Manual"
+  // (setCodigo() asigna el valor por código, así que no dispara este evento.)
+  $("codigo").addEventListener("input", () => {
+    $("formatoVal").value = "Manual";
+    formatoEl.textContent = "Formato: Manual";
+  });
+
+  // ===== Guardar =====
+  $("form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("btnSave");
+    const datos = {
+      token: TOKEN,
+      hoja: HOJA,
+      fecha: new Date().toISOString(),
+      tipo: $("tipo").value,
+      codigo: $("codigo").value.trim(),
+      formato: $("formatoVal").value || "Manual",
+      cantidad: $("cantidad").value.trim(),
+      usuario: $("usuario").value.trim(),
+      notas: $("notas").value.trim()
+    };
+    if (!datos.codigo || !datos.cantidad || !datos.usuario) {
+      setStatus("Completa código, cantidad/lectura y usuario.", "err");
+      return;
+    }
+    try { localStorage.setItem("ec_usuario", datos.usuario); } catch (e) {}
+
+    btn.disabled = true;
+    setStatus("Guardando…", "muted");
+    try {
+      // text/plain evita el preflight CORS de Apps Script; el script lee el JSON del cuerpo.
+      await fetch(ENDPOINT, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(datos)
+      });
+      setStatus("Enviado. Revisa la hoja \"Escaneos\".", "ok");
+      $("codigo").value = "";
+      $("formatoVal").value = "";
+      formatoEl.textContent = "Formato: —";
+      $("cantidad").value = "";
+      $("notas").value = "";
+    } catch (e) {
+      setStatus("Error de red. No se guardó: " + e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
